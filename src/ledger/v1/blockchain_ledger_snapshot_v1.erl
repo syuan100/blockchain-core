@@ -136,7 +136,7 @@ deliver(Res) ->
               ok
     end.
 
--spec generate_snapshot(blockchain_ledger_v1:ledger(), [binary()], mode()) ->
+-spec generate_snapshot(blockchain_ledger_v1:ledger(), [binary()], blockchain_ledger_v1:mode()) ->
       {ok, snapshot()}
     | {error, term()}.  % TODO More-specific than just term()
 generate_snapshot(Ledger0, Blocks, Mode) ->
