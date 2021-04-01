@@ -35,8 +35,8 @@ dial(_Swarm, Peer, _Opts) ->
         %% get the test specific grpc port for the peer
         %% ( which is going to be the libp2p port + 1000 )
         %% see blockchain_ct_utils for more info
-        PeerGrpcPort = p2p_port_to_grpc_port(Peer),
-        lager:debug("connecting over grpc to peer ~p on port ~p", [Peer, PeerGrpcPort]),
+        {ok, PeerGrpcPort} = p2p_port_to_grpc_port(Peer),
+        lager:info("connecting over grpc to peer ~p on port ~p", [Peer, PeerGrpcPort]),
         {ok, Connection} = grpc_client:connect(tcp, "127.0.0.1", PeerGrpcPort),
         grpc_client_stream_custom:new(
             Connection,
@@ -47,7 +47,7 @@ dial(_Swarm, Peer, _Opts) ->
             ?MODULE
         )
      catch _Error:_Reason:_Stack ->
-        lager:warning("*** failed to connect over grpc to peer ~p.  Reason ~p", [Peer, _Reason]),
+        lager:warning("*** failed to connect over grpc to peer ~p.  Reason ~p Stack ~p", [Peer, _Reason, _Stack]),
         {error, failed_to_dial_peer}
      end.
 
@@ -91,5 +91,5 @@ p2p_port_to_grpc_port(PeerAddr)->
     ListenAddrs = libp2p_peer:listen_addrs(PeerInfo),
     [H | _ ] = libp2p_transport:sort_addrs(SwarmTID, ListenAddrs),
     [_, _, _IP,_, Port] = _Full = re:split(H, "/"),
-    lager:debug("*** peer p2p port ~p", [Port]),
-    list_to_integer(binary_to_list(Port)) + 1000.
+    lager:info("*** peer p2p port ~p", [Port]),
+    {ok, list_to_integer(binary_to_list(Port)) + 1000}.

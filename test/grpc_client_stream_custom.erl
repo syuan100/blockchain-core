@@ -217,6 +217,7 @@ send_msg(#{stream_id := StreamId,
         false ->
             DefaultHeaders = default_headers(Stream),
             AllHeaders = add_metadata(DefaultHeaders, Metadata),
+            lager:debug("sending grpc headers ~p", [AllHeaders]),
             ok = grpc_client_connection:send_headers(Connection, StreamId, AllHeaders);
         true ->
             ok
@@ -234,6 +235,7 @@ send_msg(#{stream_id := StreamId,
             {true, _} ->
                 closed
         end,
+    lager:debug("sending grpc msg ~p", [Encoded]),
     ok = grpc_client_connection:send_body(Connection, StreamId, Encoded, Opts),
     Stream#{headers_sent => true,
             state => NewState}.

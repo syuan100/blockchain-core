@@ -213,8 +213,7 @@ full_test(Config) ->
     Stuff1 = ct_rpc:call(RouterNode, application, get_all_env, [grpcbox]),
     Stuff2 = ct_rpc:call(RouterNode, application, get_all_env, [blockchain]),
     ct:pal("RouterNode ~p", [RouterNode]),
-    ct:pal("grpcbox stuff ~p", [Stuff1]),
-    ct:pal("blockchain stuff ~p", [Stuff2]),
+    ct:pal("Gateway node1 ~p", [GatewayNode1]),
 
     %% Check that the meck txn forwarding works
     Self = self(),
@@ -239,7 +238,6 @@ full_test(Config) ->
     SCOpenBlockHash = blockchain_block:hash_block(Block0),
 
     %% Fake gossip block
-    ct:pal("RouterNode ~p", [RouterNode]),
     ok = ct_rpc:call(RouterNode, blockchain_gossip_handler, add_block, [Block0, RouterChain, Self, RouterSwarm]),
 
     %% Wait till the block is gossiped
@@ -256,7 +254,6 @@ full_test(Config) ->
     %% Sending 1 packet
     DevNonce0 = crypto:strong_rand_bytes(2),
     Packet0 = blockchain_ct_utils:join_packet(?APPKEY, DevNonce0, 0.0),
-    ct:pal("Gateway node1 ~p", [GatewayNode1]),
     ok = ct_rpc:call(GatewayNode1, blockchain_state_channels_client, packet, [Packet0, [], 'US915']),
 
     %% Checking state channel on server/client
