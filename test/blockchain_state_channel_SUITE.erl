@@ -210,8 +210,6 @@ full_test(Config) ->
     RouterChain = ct_rpc:call(RouterNode, blockchain_worker, blockchain, []),
     RouterSwarm = ct_rpc:call(RouterNode, blockchain_swarm, swarm, []),
     RouterPubkeyBin = ct_rpc:call(RouterNode, blockchain_swarm, pubkey_bin, []),
-    Stuff1 = ct_rpc:call(RouterNode, application, get_all_env, [grpcbox]),
-    Stuff2 = ct_rpc:call(RouterNode, application, get_all_env, [blockchain]),
     ct:pal("RouterNode ~p", [RouterNode]),
     ct:pal("Gateway node1 ~p", [GatewayNode1]),
 
