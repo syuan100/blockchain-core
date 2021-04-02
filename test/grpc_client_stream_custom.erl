@@ -10,7 +10,7 @@
 %%        {module_name_suffix, "_client_pb"},
 %%        {rename, {msg_name, {suffix, "_pb"}}},
 %%        {strings_as_binaries, false},
-%%        {defs_as_maps, true},
+%%        {defs_as_proplists, true},
 %%        type_specs,
 %%    ]}
 
@@ -188,11 +188,13 @@ new_stream(Connection, Service, Rpc, Encoder, Options) ->
     Metadata = proplists:get_value(metadata, Options, #{}),
     TransportOptions = proplists:get_value(http2_options, Options, []),
     {ok, StreamId} = grpc_client_connection:new_stream(Connection, TransportOptions),
+    %% RpcDef here will be a prop, need to convert it to a map
     RpcDef = Encoder:find_rpc_def(Service, Rpc),
+    RpcDefMap = maps:from_list(RpcDef),
     %% the gpb rpc def has 'input', 'output' etc.
     %% All the information is combined in 1 map,
     %% which is is the state of the gen_server.
-    RpcDef#{stream_id => StreamId,
+    RpcDefMap#{stream_id => StreamId,
             package => [],
             service => Service,
             rpc => Rpc,

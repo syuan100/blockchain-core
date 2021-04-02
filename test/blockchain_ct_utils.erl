@@ -190,7 +190,7 @@ init_per_testcase(TestCase, Config) ->
     TotalNodes = get_config("T", 8),
     NumConsensusMembers = get_config("N", 7),
     SeedNodes = [],
-    PeerCacheTimeout = 100,
+    PeerCacheTimeout = 10000,
     Port = get_config("PORT", 0),
 
     NodeNames = lists:map(fun(_M) -> list_to_atom(randname(5)) end, lists:seq(1, TotalNodes)),
@@ -258,14 +258,14 @@ init_per_testcase(TestCase, Config) ->
                 end, Addrs)
       end, Nodes),
 
-    %% wit until each node is gossiping with its peers
+    %% make sure each node is gossiping with a majority of its peers
     ok = wait_until(
              fun() ->
                      lists:all(
                        fun(Node) ->
                                try
                                    GossipPeers = ct_rpc:call(Node, blockchain_swarm, gossip_peers, [], 500),
-                                   case length(GossipPeers) >= TotalNodes - 1 of
+                                   case length(GossipPeers) >= (length(Nodes) / 2) + 1 of
                                        true -> true;
                                        false ->
                                            ct:pal("~p is not connected to enough peers ~p", [Node, GossipPeers]),
