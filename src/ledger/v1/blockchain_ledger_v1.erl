@@ -4230,7 +4230,7 @@ poc_test() ->
                    (h3_neighbor_res, _) ->
                         {ok, 12};
                     (full_gateway_capabilities_mask, _) ->
-                        {ok, ?GW_CAPABILITIES_FULL_GATEWAY}
+                        {ok, ?GW_CAPABILITIES_FULL_GATEWAY_V1}
                 end),
 
     ?assertEqual({error, not_found}, find_poc(OnionKeyHash0, Ledger)),
