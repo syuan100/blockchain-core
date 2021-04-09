@@ -19,8 +19,12 @@
          valid_memo_test/1,
          negative_memo_test/1,
          valid_memo_not_set_test/1,
-         invalid_memo_not_set_test/1
+         invalid_memo_not_set_test/1,
+         big_memo_valid_test/1,
+         big_memo_invalid_test/1
         ]).
+
+
 
 all() ->
     [
@@ -36,10 +40,14 @@ all() ->
      valid_memo_test,
      negative_memo_test,
      valid_memo_not_set_test,
-     invalid_memo_not_set_test
+     invalid_memo_not_set_test,
+     big_memo_valid_test,
+     big_memo_invalid_test
     ].
 
 -define(MAX_PAYMENTS, 20).
+-define(VALID_GIANT_MEMO, 18446744073709551615).        %% max 64 bit number
+-define(INVALID_GIANT_MEMO, 18446744073709551616).      %% max 64 bit number + 1, takes 72 bits
 
 %%--------------------------------------------------------------------
 %% TEST CASE SETUP
@@ -495,10 +503,77 @@ invalid_memo_not_set_test(Config) ->
     ?assertEqual(invalid_memo_before_var, InvalidReason),
     ok.
 
+big_memo_valid_test(Config) ->
+    BaseDir = ?config(base_dir, Config),
+    ConsensusMembers = ?config(consensus_members, Config),
+    BaseDir = ?config(base_dir, Config),
+    Balance = ?config(balance, Config),
+    Chain = ?config(chain, Config),
+
+    %% Test a payment transaction, add a block and check balances
+    [_, {Payer, {_, PayerPrivKey, _}} | _] = ConsensusMembers,
+
+    %% Create a payment to a single payee
+    Recipient = blockchain_swarm:pubkey_bin(),
+    Amount = 100,
+    Payment1 = blockchain_payment_v2:new(Recipient, Amount, ?VALID_GIANT_MEMO),
+
+    Tx = blockchain_txn_payment_v2:new(Payer, [Payment1], 1),
+    SigFun = libp2p_crypto:mk_sig_fun(PayerPrivKey),
+    SignedTx = blockchain_txn_payment_v2:sign(Tx, SigFun),
+
+    {ok, Block} = test_utils:create_block(ConsensusMembers, [SignedTx]),
+    _ = blockchain_gossip_handler:add_block(Block, Chain, self(), blockchain_swarm:swarm()),
+
+    ?assertEqual({ok, blockchain_block:hash_block(Block)}, blockchain:head_hash(Chain)),
+    ?assertEqual({ok, Block}, blockchain:head_block(Chain)),
+    ?assertEqual({ok, 2}, blockchain:height(Chain)),
+
+    ?assertEqual({ok, Block}, blockchain:get_block(2, Chain)),
+
+    Ledger = blockchain:ledger(Chain),
+
+    {ok, NewEntry0} = blockchain_ledger_v1:find_entry(Recipient, Ledger),
+    ?assertEqual(Balance + Amount, blockchain_ledger_entry_v1:balance(NewEntry0)),
+
+    {ok, NewEntry1} = blockchain_ledger_v1:find_entry(Payer, Ledger),
+    ?assertEqual(Balance - Amount, blockchain_ledger_entry_v1:balance(NewEntry1)),
+    ok.
+
+big_memo_invalid_test(Config) ->
+    BaseDir = ?config(base_dir, Config),
+    ConsensusMembers = ?config(consensus_members, Config),
+    BaseDir = ?config(base_dir, Config),
+    Chain = ?config(chain, Config),
+
+    %% Test a payment transaction, add a block and check balances
+    [_, {Payer, {_, PayerPrivKey, _}}|_] = ConsensusMembers,
+
+    %% Create a payment to a single payee
+    Recipient = blockchain_swarm:pubkey_bin(),
+    Amount = 100,
+    Payment1 = blockchain_payment_v2:new(Recipient, Amount, ?INVALID_GIANT_MEMO),
+
+    Tx = blockchain_txn_payment_v2:new(Payer, [Payment1], 1),
+    SigFun = libp2p_crypto:mk_sig_fun(PayerPrivKey),
+    SignedTx = blockchain_txn_payment_v2:sign(Tx, SigFun),
+
+    %% Placeholder: update when we land a better version of add_block in test_utils
+    %% which does validations, this will suffice for now
+    %% NOTE: SignedTx being in the second pos implies it's invalid
+    {[], [{SignedTx, InvalidReason}]} = blockchain_txn:validate([SignedTx], Chain),
+    ct:pal("InvalidReason: ~p", [InvalidReason]),
+    ?assertEqual(invalid_memo, InvalidReason),
+    ok.
+
 %%--------------------------------------------------------------------
 %% Internal Functions
 %%--------------------------------------------------------------------
 
+extra_vars(big_memo_valid_test) ->
+    #{?max_payments => ?MAX_PAYMENTS, ?allow_zero_amount => false, ?allow_payment_v2_memos => true};
+extra_vars(big_memo_invalid_test) ->
+    #{?max_payments => ?MAX_PAYMENTS, ?allow_zero_amount => false, ?allow_payment_v2_memos => true};
 extra_vars(valid_memo_test) ->
     #{?max_payments => ?MAX_PAYMENTS, ?allow_zero_amount => false, ?allow_payment_v2_memos => true};
 extra_vars(negative_memo_test) ->
