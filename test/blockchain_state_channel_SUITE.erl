@@ -157,7 +157,7 @@ init_per_testcase(Test, Config) ->
                           ?assertMatch(ok, ct_rpc:call(Node, blockchain_worker, integrate_genesis_block, [GenesisBlock]))
                   end, Nodes),
 
-    %% wait till each worker gets the gensis block
+    %% wait till each worker gets the genesis block
     ok = lists:foreach(
            fun(Node) ->
                    ok = blockchain_ct_utils:wait_until(
