@@ -745,7 +745,7 @@ new_snapshot(#ledger_v1{db=DB,
                                         end,
                                         CFs
                                     ),
-                                    rocksdb:close_db(OldDB),
+                                    rocksdb:close(OldDB),
                                     % remove_checkpoint(OldDir),
                                     {ok, Ledger};
                                 {error, Reason1}=Error1 ->
