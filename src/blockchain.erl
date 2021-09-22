@@ -525,7 +525,7 @@ ledger_at(Height, Chain0, ForceRecalc) ->
                 {ok, Height} ->
                     %% Delayed height is the height we want, just return a new context
                     {ok, blockchain_ledger_v1:new_context(DelayedLedger)};
-                {ok, DelayedHeight} when Height > DelayedHeight andalso Height =< CurrentHeight ->
+                {ok, DelayedHeight} when Height =< CurrentHeight ->
                     case blockchain_ledger_v1:has_snapshot(Height, DelayedLedger) of
                         {ok, SnapshotLedger} when not ForceRecalc ->
                             {ok, SnapshotLedger};
@@ -544,8 +544,8 @@ ledger_at(Height, Chain0, ForceRecalc) ->
                                     Error
                             end
                     end;
-                {ok, DelayedHeight} when Height < DelayedHeight ->
-                    {error, height_too_old};
+                % {ok, DelayedHeight} when Height < DelayedHeight ->
+                %     {error, height_too_old};
                 {error, _}=Error ->
                     Error
             end;
