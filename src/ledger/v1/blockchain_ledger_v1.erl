@@ -734,9 +734,9 @@ new_snapshot(#ledger_v1{db=DB,
                                 ok ->
                                     DelayedLedger = blockchain_ledger_v1:mode(delayed, Ledger),
                                     {ok, DelayedHeight} = current_height(DelayedLedger),
-                                    OldDir = checkpoint_dir(Ledger, DeleteHeight),
-                                    BaseDir = checkpoint_base(OldDir),
-                                    OldPath = filename:join([BaseDir, "checkpoints", integer_to_list(DeleteHeight)]),
+                                    % OldDir = checkpoint_dir(Ledger, DeleteHeight),
+                                    % BaseDir = checkpoint_base(OldDir),
+                                    OldPath = filename:join(["data", "checkpoints", integer_to_list(DeleteHeight)]),
                                     GlobalOpts = application:get_env(rocksdb, global_opts, []),
                                     {ok, OldDB, CFs} = open_db(active, OldPath, true, false, GlobalOpts),
                                     lists:foreach(
@@ -745,6 +745,7 @@ new_snapshot(#ledger_v1{db=DB,
                                         end,
                                         CFs
                                     ),
+                                    rocksdb:close_db(OldDB),
                                     % remove_checkpoint(OldDir),
                                     {ok, Ledger};
                                 {error, Reason1}=Error1 ->
