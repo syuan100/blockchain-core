@@ -735,7 +735,16 @@ new_snapshot(#ledger_v1{db=DB,
                                     DelayedLedger = blockchain_ledger_v1:mode(delayed, Ledger),
                                     {ok, DelayedHeight} = current_height(DelayedLedger),
                                     OldDir = checkpoint_dir(Ledger, DeleteHeight),
-                                    remove_checkpoint(OldDir),
+                                    GlobalOpts = application:get_env(rocksdb, global_opts, []),
+                                    {ok, OldDB, CFs} = open_db(aux, OldDir, false, false, GlobalOpts),
+                                    lists:foreach(
+                                        fun(CF) when CF /= "entries" ->
+                                            rocksdb:destroy_column_family(OldDB, CF)
+                                        end,
+                                        CFs
+                                    ),
+                                    ok = rocksdb:close(DB),
+                                    % remove_checkpoint(OldDir),
                                     {ok, Ledger};
                                 {error, Reason1}=Error1 ->
                                     lager:error("Error creating new checkpoint for snapshot reason: ~p", [Reason1]),
