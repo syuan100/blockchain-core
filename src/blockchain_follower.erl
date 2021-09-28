@@ -109,8 +109,8 @@ handle_info({blockchain_event, {add_block, Hash, Sync, Ledger}},
                                                                      case blockchain:ledger_at(MissingHeight, Chain) of
                                                                          {error, height_too_old} ->
                                                                              {ok, undefined};
-                                                                         _ ->
-                                                                             blockchain:ledger_at(MissingHeight, Chain)
+                                                                         OldLedger ->
+                                                                             OldLedger
                                                                      end;
                                                                  false ->
                                                                      {ok, undefined}
