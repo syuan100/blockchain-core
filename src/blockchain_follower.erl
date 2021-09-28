@@ -106,7 +106,12 @@ handle_info({blockchain_event, {add_block, Hash, Sync, Ledger}},
                                        MissingHash = blockchain_block:hash_block(MissingBlock),
                                        {ok, MissingLedger} = case RequiresLedger of
                                                                  true ->
-                                                                     blockchain:ledger_at(MissingHeight, Chain);
+                                                                     case blockchain:ledger_at(MissingHeight, Chain) of
+                                                                         {ok, Ledger} ->
+                                                                             {ok, Ledger};
+                                                                         {error, height_too_old} ->
+                                                                             {ok, undefined}
+                                                                     end;
                                                                  false ->
                                                                      {ok, undefined}
                                                              end,
