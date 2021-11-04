@@ -519,6 +519,7 @@ ledger_at(Height, Chain0) ->
 
 -spec ledger_at(pos_integer(), blockchain(), boolean()) -> {ok, blockchain_ledger_v1:ledger()} | {error, any()}.
 ledger_at(Height, Chain0, ForceRecalc) ->
+    lager:info("Ledger at"),
     Ledger = ?MODULE:ledger(Chain0),
     case blockchain_ledger_v1:current_height(Ledger) of
         {ok, CurrentHeight} when Height > CurrentHeight andalso not ForceRecalc ->
@@ -561,6 +562,7 @@ ledger_at(Height, Chain0, ForceRecalc) ->
     end.
 
 fold_blocks(Chain0, DelayedHeight, DelayedLedger, Height, ForceRecalc) ->
+    lager:info("Folding blocks"),
     %% to minimize work, check backwards for snapshots
     {HighestSnapHeight, HighestLedger} =
         lists:foldl(
