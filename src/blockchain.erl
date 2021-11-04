@@ -519,7 +519,7 @@ ledger_at(Height, Chain0) ->
 
 -spec ledger_at(pos_integer(), blockchain(), boolean()) -> {ok, blockchain_ledger_v1:ledger()} | {error, any()}.
 ledger_at(Height, Chain0, ForceRecalc) ->
-    lager:info("Ledger at"),
+    lager:info("Ledger at height ~p", [Height]),
     Ledger = ?MODULE:ledger(Chain0),
     case blockchain_ledger_v1:current_height(Ledger) of
         {ok, CurrentHeight} when Height > CurrentHeight andalso not ForceRecalc ->
