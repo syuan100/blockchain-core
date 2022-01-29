@@ -48,6 +48,13 @@
 %% the right thing for the spots and easy to work around elsewhere.
 -define(min_height, 2).
 
+-type kv_stream() ::
+    kv_stream(binary(), binary()).
+
+%% TODO Should be: -type stream(A) :: fun(() -> none | {some, {A, t(A)}}).
+-type kv_stream(K, V) ::
+    fun(() -> ok | {K, V, kv_stream()}).
+
 %% this is temporary, something to work with easily while we nail the
 %% format and functionality down.  once it's final we can move on to a
 %% more permanent and less flexible format, like protobufs, or
@@ -56,45 +63,47 @@
     #{
         version           => v5,
         current_height    => non_neg_integer(),
-        transaction_fee   =>  non_neg_integer(),
+        transaction_fee   => non_neg_integer(),
         consensus_members => [libp2p_crypto:pubkey_bin()],
         election_height   => non_neg_integer(),
         election_epoch    => non_neg_integer(),
-        delayed_vars      => [{integer(), [{Hash :: term(), TODO :: term()}]}], % TODO More specific
+        delayed_vars      => [{Height :: integer(), [{Hash :: binary(), Vars :: term()}]}], % TODO Type of Vars
         threshold_txns    => [{binary(), binary()}], % According to spec of blockchain_ledger_v1:snapshot_threshold_txns
         master_key        => binary(),
         multi_keys        => [binary()],
         vars_nonce        => pos_integer(),
-        vars              => [{binary(), term()}], % TODO What is the term()?
+        vars              => [{Name :: binary(), Val :: term()}], % XXX Val can be anything.
         htlcs             => [{Address :: binary(), blockchain_ledger_htlc_v1:htlc()}],
-        ouis              => [term()], % TODO Be more specific
-        subnets           => [term()], % TODO Be more specific
+        ouis              => [{non_neg_integer(), blockchain_ledger_routing_v1:routing()}],
+        subnets           => [{Subnet :: binary(), OUI :: non_neg_integer()}],
         oui_counter       => pos_integer(),
-        hexes             => [term()], % TODO Be more specific
+        hexes             => [{list, blockchain_ledger_v1:hexmap()} | {h3:h3_index(), [libp2p_crypto:pubkey_bin()]}],
         h3dex             => [{integer(), [binary()]}],
         state_channels    => [{binary(), state_channel()}],
         blocks            => [blockchain_block:block()],
         oracle_price      => non_neg_integer(),
         oracle_price_list => [blockchain_ledger_oracle_price_entry:oracle_price_entry()],
+        key_raw()         => [{binary(), binary()}]
+    }.
 
-        %% Raw
-        gateways          => [{binary(), binary()}],
-        pocs              => [{binary(), binary()}],
-        accounts          => [{binary(), binary()}],
-        dc_accounts       => [{binary(), binary()}],
-        security_accounts => [{binary(), binary()}]
+-type file_position() ::
+    {
+        file:fd(),
+        Pos :: non_neg_integer(),
+        Len :: pos_integer()
     }.
 
 -type snapshot_v6() ::
     #{
-        version              => v6,
-        key_except_version() => binary() | {file:fd(), non_neg_integer(), pos_integer()}
+        version                   => v6,
+        key_non_version_non_raw() => binary() | file_position(),
+        key_raw()                 => kv_stream()
     }.
 
 -type key() ::
-    version | key_except_version().
+    version | key_non_version_non_raw().
 
--type key_except_version() ::
+-type key_non_version_non_raw() ::
       current_height
     | transaction_fee
     | consensus_members
@@ -117,9 +126,13 @@
     | infos
     | oracle_price
     | oracle_price_list
+    | upgrades
+    | net_overage
+    | hnt_burned
+    .
 
-    %% Raw
-    | gateways
+-type key_raw() ::
+      gateways
     | pocs
     | accounts
     | dc_accounts
@@ -127,12 +140,13 @@
     .
 
 -type snapshot_of_any_version() ::
-    #blockchain_snapshot_v1{}
+      #blockchain_snapshot_v1{}
     | #blockchain_snapshot_v2{}
     | #blockchain_snapshot_v3{}
     | #blockchain_snapshot_v4{}
     | snapshot_v5()
-    | snapshot_v6().
+    | snapshot_v6()
+    .
 
 -type snapshot() :: snapshot_v6().
 
@@ -289,7 +303,7 @@ generate_snapshot_v5(Ledger0, Blocks, Infos, Mode) ->
             [
                 {version          , v5},
                 {current_height   , CurrHeight},
-                {transaction_fee  ,  0},
+                {transaction_fee  , 0},
                 {consensus_members, ConsensusMembers},
                 {election_height  , ElectionHeight},
                 {election_epoch   , ElectionEpoch},
@@ -358,20 +372,15 @@ serialize(Snapshot, BlocksOrNoBlocks) ->
 
 -spec serialize_v6(snapshot_v6(), blocks | noblocks) -> iolist().
 serialize_v6(#{version := v6}=Snapshot0, BlocksOrNoBlocks) ->
+    EmptyListBin = term_to_binary([]),
     Blocks =
         case BlocksOrNoBlocks of
             blocks ->
-                term_to_binary(
-                  lists:map(
-                    fun (B) when is_tuple(B) ->
-                            blockchain_block:serialize(B);
-                        (B) -> B
-                    end,
-                    deserialize_field(blocks, maps:get(blocks, Snapshot0, []))
-                   ));
+                maps:get(blocks, Snapshot0, EmptyListBin);
             noblocks ->
-                term_to_binary([])
+                EmptyListBin
         end,
+
     Snapshot1 = maps:put(blocks, Blocks, Snapshot0),
 
     Pairs = lists:keysort(1, maps:to_list(Snapshot1)),
@@ -427,7 +436,7 @@ deserialize(DigestOpt, {file, Filename}) ->
             file:close(FD),
             {ok, Bin} = file:read_file(Filename),
             deserialize(DigestOpt, Bin);
-        _ ->
+        6 ->
             Pairs = find_pairs_in_file(FD, 5, 5+Siz),
             {ok, upgrade(maps:from_list(Pairs ++ [{version, v6}]))}
     end;
@@ -586,6 +595,13 @@ load_into_ledger(Snapshot, L0, Mode) ->
                        end || maps:is_key(hnt_burned, Snapshot)] ++
                       %% keep this last so incomplete loads are obvious
                       [current_height], Get, L),
+    case blockchain_ledger_v1:check_key(<<"poc_upgrade">>, L) of
+        true -> ok;
+        _ ->
+            %% have to do this here, otherwise it'll break block loads
+            blockchain_ledger_v1:upgrade_pocs(L),
+            blockchain_ledger_v1:mark_key(<<"poc_upgrade">>, L)
+    end,
     blockchain_ledger_v1:commit_context(L).
 
 
@@ -619,188 +635,116 @@ print_memory() ->
 -spec load_blocks(blockchain_ledger_v1:ledger(), blockchain:blockchain(), snapshot()) ->
     ok.
 load_blocks(Ledger0, Chain, Snapshot) ->
-    lager:info("loading blocks"),
     print_memory(),
+    lager:info("loading block info"),
     Infos =
         case maps:find(infos, Snapshot) of
             {ok, Is} when is_binary(Is) ->
-                lists:map(fun erlang:binary_to_term/1, binary_to_term(Is));
-            {ok, {FD, Pos, Len}} ->
-                {ok, Pos} = file:position(FD, {bof, Pos}),
-                {ok, Is} = file:read(FD, Len),
-                lists:map(fun erlang:binary_to_term/1, binary_to_term(Is));
+                stream_from_list(binary_to_term(Is));
+            {ok, {_, _, _}=InfoFileHandle} ->
+                blockchain_term:from_file_stream_bin_list(InfoFileHandle);
             error ->
-                []
+                stream_from_list([])
         end,
-    Blocks =
-        case maps:find(blocks, Snapshot) of
-            {ok, Bs} when is_binary(Bs) ->
-                lager:info("blocks binary is ~p", [byte_size(Bs)]),
-                print_memory(),
-                %% use a custom decoder here to preserve sub binary references
-                binary_to_list_of_binaries(Bs);
-            {ok, {FD2, Pos2, Len2}} ->
-                {ok, Pos2} = file:position(FD2, {bof, Pos2}),
-                {ok, Bs} = file:read(FD2, Len2),
-                lager:info("blocks binary is ~p", [byte_size(Bs)]),
-                print_memory(),
-                binary_to_list_of_binaries(Bs);
-            error ->
-                []
-        end,
-
-    print_memory(),
-    {ok, Curr2} = blockchain_ledger_v1:current_height(Ledger0),
-
-    lager:info("ledger height is ~p before absorbing snapshot", [Curr2]),
-    lager:info("snapshot contains ~p blocks", [length(Blocks)]),
-
-    case Infos of
-        [] -> ok;
-        [_|_] ->
-            lists:foreach(
-              fun
+    stream_iter(
+      fun(Bin) ->
+              case binary_to_term(Bin) of
                   ({Ht, #block_info{hash = Hash} = Info}) ->
                       ok = blockchain:put_block_height(Hash, Ht, Chain),
                       ok = blockchain:put_block_info(Ht, Info, Chain);
                   ({Ht, #block_info_v2{hash = Hash} = Info}) ->
                       ok = blockchain:put_block_height(Hash, Ht, Chain),
                       ok = blockchain:put_block_info(Ht, Info, Chain)
-              end,
-              Infos)
-    end,
+              end
+      end,
+      Infos),
+    print_memory(),
+    lager:info("loading blocks"),
+    BlockStream =
+        case maps:find(blocks, Snapshot) of
+            {ok, <<Bs/binary>>} ->
+                lager:info("blocks binary is ~p", [byte_size(Bs)]),
+                print_memory(),
+                %% use a custom decoder here to preserve sub binary references
+                {ok, Blocks0} = blockchain_term:from_bin(Bs),
+                stream_from_list(Blocks0);
+            {ok, {_, _, _}=FileHandle} ->
+                blockchain_term:from_file_stream_bin_list(FileHandle);
+            error ->
+                stream_from_list([])
+        end,
 
-    case Blocks of
-        [] ->
-            %% ignore blocks in testing
+    true = erlang:is_function(BlockStream),
+
+    print_memory(),
+    {ok, Curr2} = blockchain_ledger_v1:current_height(Ledger0),
+
+    lager:info("ledger height is ~p before absorbing snapshot", [Curr2]),
+
+    stream_iter(
+      fun(Res) ->
+            Block0 =
+                case Res of
+                    {ok, <<B0/binary>>} -> B0;
+                    <<B0/binary>> -> B0
+                end,
+              Block =
+              case Block0 of
+                  B when is_binary(B) ->
+                      blockchain_block:deserialize(B);
+                  B -> B
+              end,
+
+              Ht = blockchain_block:height(Block),
+              %% since hash and block are written at the same time, just getting the
+              %% hash from the height is an acceptable presence check, and much cheaper
+              case blockchain:get_block_hash(Ht, Chain, false) of
+                  {ok, _Hash} ->
+                      lager:info("skipping block ~p", [Ht]),
+                      %% already have it, don't need to store it again.
+                      ok;
+                  _ ->
+                      lager:info("saving block ~p", [Ht]),
+                      ok = blockchain:save_block(Block, Chain)
+              end,
+              print_memory(),
+              case Ht > Curr2 of
+                  %% we need some blocks before for history, only absorb if they're
+                  %% not on the ledger already
+                  true ->
+                      lager:info("loading block ~p", [Ht]),
+                      Ledger2 = blockchain_ledger_v1:new_context(Ledger0),
+                      Chain1 = blockchain:ledger(Ledger2, Chain),
+                      Rescue = blockchain_block:is_rescue_block(Block),
+                      {ok, _Chain} = blockchain_txn:absorb_block(Block, Rescue, Chain1),
+                      %% Hash = blockchain_block:hash_block(Block),
+                      ok = blockchain_ledger_v1:maybe_gc_pocs(Chain1, Ledger2),
+                      ok = blockchain_ledger_v1:maybe_gc_scs(Chain1, Ledger2),
+                      %% ok = blockchain_ledger_v1:refresh_gateway_witnesses(Hash, Ledger2),
+                      ok = blockchain_ledger_v1:maybe_recalc_price(Chain1, Ledger2),
+                      %% TODO Q: Why no match result?
+                      blockchain_ledger_v1:commit_context(Ledger2),
+                      blockchain_ledger_v1:new_snapshot(Ledger0),
+                      print_memory();
+                  _ ->
+                      ok
+              end
+      end,
+      BlockStream).
+
+stream_iter(F, S0) ->
+    case S0() of
+        none ->
             ok;
-        [_|_] ->
-            %% just store the head, we'll need it sometimes
-            lists:foreach(
-              fun(Block0) ->
-                      Block =
-                      case Block0 of
-                          B when is_binary(B) ->
-                              blockchain_block:deserialize(B);
-                          B -> B
-                      end,
-
-                      Ht = blockchain_block:height(Block),
-                      %% since hash and block are written at the same time, just getting the
-                      %% hash from the height is an acceptable presence check, and much cheaper
-                      case blockchain:get_block_hash(Ht, Chain, false) of
-                          {ok, _Hash} ->
-                              lager:info("skipping block ~p", [Ht]),
-                              %% already have it, don't need to store it again.
-                              ok;
-                          _ ->
-                              lager:info("saving block ~p", [Ht]),
-                              ok = blockchain:save_block(Block, Chain)
-                      end,
-                      print_memory(),
-                      case Ht > Curr2 of
-                          %% we need some blocks before for history, only absorb if they're
-                          %% not on the ledger already
-                          true ->
-                              lager:info("loading block ~p", [Ht]),
-                              Ledger2 = blockchain_ledger_v1:new_context(Ledger0),
-                              Chain1 = blockchain:ledger(Ledger2, Chain),
-                              Rescue = blockchain_block:is_rescue_block(Block),
-                              {ok, _Chain} = blockchain_txn:absorb_block(Block, Rescue, Chain1),
-                              %% Hash = blockchain_block:hash_block(Block),
-                              ok = blockchain_ledger_v1:maybe_gc_pocs(Chain1, Ledger2),
-                              ok = blockchain_ledger_v1:maybe_gc_scs(Chain1, Ledger2),
-                              %% ok = blockchain_ledger_v1:refresh_gateway_witnesses(Hash, Ledger2),
-                              ok = blockchain_ledger_v1:maybe_recalc_price(Chain1, Ledger2),
-                              %% TODO Q: Why no match result?
-                              blockchain_ledger_v1:commit_context(Ledger2),
-                              blockchain_ledger_v1:new_snapshot(Ledger0),
-                              print_memory();
-                          _ ->
-                              ok
-                      end
-              end,
-              Blocks)
+        {some, {X, S1}} ->
+            F(X),
+            stream_iter(F, S1)
     end.
 
-
-%% attempt to deserialized a t2b list of binaries while preserving sub binaries
-%% <131,108,0,0,0,67,109,0,8,158,52,10,176,188,34,10,32,255,217,4,161,91,57,91,235,181,102,170,40
-%% 131 is erlang external term format byte
-%% 108 is start of list
-%% 106 is end of list
-%% 109 is start of binary
-%% 104 is small tuple
-%% 100 is atom ext
-%% https://www.erlang.org/doc/apps/erts/erl_ext_dist.html
-binary_to_list_of_binaries(<<131, 106>>) ->
-    [];
-binary_to_list_of_binaries(<<131, 108, _Length:32/integer-unsigned-big, Rest/binary>>) ->
-    binary_to_list_of_binaries(Rest, []).
-
-binary_to_list_of_binaries(<<106>>, Acc) ->
-    lists:reverse(Acc);
-binary_to_list_of_binaries(<<109, Length:32/integer-unsigned-big, Bin:Length/binary, Rest/binary>>, Acc) ->
-    binary_to_list_of_binaries(Rest, [Bin | Acc]).
-
-binary_to_proplist(<<131, 108, Length:32/integer-unsigned-big, Rest/binary>>) ->
-    {Res, <<>>} = decode_list(Rest, Length, []),
-    Res.
-
-decode_map(Rest, 0, Acc) ->
-    {Acc, Rest};
-decode_map(Bin, Arity, Acc) ->
-    {Key, T1} = decode_value(Bin),
-    {Value, T2} = decode_value(T1),
-    decode_map(T2, Arity - 1, maps:put(Key, Value, Acc)).
-
-decode_list(<<106, Rest/binary>>, 0, Acc) ->
-    {lists:reverse(Acc), Rest};
-decode_list(Rest, 0, Acc) ->
-    %% tuples don't end with an empty list
-    {lists:reverse(Acc), Rest};
-decode_list(<<104, Size:8/integer, Bin/binary>>, Length, Acc) ->
-    {List, Rest} = decode_list(Bin, Size, []),
-    decode_list(Rest, Length - 1, [list_to_tuple(List)|Acc]);
-decode_list(<<108, L2:32/integer-unsigned-big, Bin/binary>>, Length, Acc) ->
-    {List, Rest} = decode_list(Bin, L2, []),
-    decode_list(Rest, Length - 1, [List|Acc]);
-decode_list(<<106, Rest/binary>>, Length, Acc) ->
-    %% sometimes there's an embedded empty list
-    decode_list(Rest, Length - 1, [[] |Acc]);
-decode_list(Bin, Length, Acc) ->
-    {Val, Rest} = decode_value(Bin),
-    decode_list(Rest, Length -1, [Val|Acc]).
-
-decode_value(<<97, Integer:8/integer, Rest/binary>>) ->
-    {Integer, Rest};
-decode_value(<<98, Integer:32/integer-big, Rest/binary>>) ->
-    {Integer, Rest};
-decode_value(<<100, AtomLen:16/integer-unsigned-big, Atom:AtomLen/binary, Rest/binary>>) ->
-    {binary_to_atom(Atom, latin1), Rest};
-decode_value(<<109, Length:32/integer-unsigned-big, Bin:Length/binary, Rest/binary>>) ->
-    {Bin, Rest};
-decode_value(<<110, N:8/integer, Sign:8/integer, Int:N/binary, Rest/binary>>) ->
-    case decode_bigint(Int, 0, 0) of
-        X when Sign == 0 ->
-            {X, Rest};
-        X when Sign == 1 ->
-            {X * -1, Rest}
-    end;
-decode_value(<<111, N:32/integer-unsigned-big, Sign:8/integer, Int:N/binary, Rest/binary>>) ->
-    case decode_bigint(Int, 0, 0) of
-        X when Sign == 0 ->
-            {X, Rest};
-        X when Sign == 1 ->
-            {X * -1, Rest}
-    end;
-decode_value(<<116, Arity:32/integer-unsigned-big, MapAndRest/binary>>) ->
-    decode_map(MapAndRest, Arity, #{}).
-
-decode_bigint(<<>>, _, Acc) ->
-    Acc;
-decode_bigint(<<B:8/integer, Rest/binary>>, Pos, Acc) ->
-    decode_bigint(Rest, Pos + 1, Acc + (B bsl (8 * Pos))).
+stream_from_list([]) ->
+    fun () -> none end;
+stream_from_list([X | Xs]) ->
+    fun () -> {some, {X, stream_from_list(Xs)}} end.
 
 -spec get_infos(blockchain:blockchain()) ->
     [binary()].
@@ -872,7 +816,7 @@ height(#{current_height := HeightBin}) when is_binary(HeightBin) ->
 
 -spec hash(snapshot_of_any_version()) -> binary().
 hash(Snap) ->
-    case maps:get(version, Snap) of
+    case version(Snap) of
         v6 ->
             %% attempt to incrementally hash the snapshot without building up a big binary
             Ctx0 = crypto:hash_init(sha256),
@@ -1286,18 +1230,35 @@ version(#blockchain_snapshot_v3{}) -> v3;
 version(#blockchain_snapshot_v2{}) -> v2;
 version(#blockchain_snapshot_v1{}) -> v1.
 
+-spec kv_stream_to_list(kv_stream(K, V)) -> [{K, V}].
+kv_stream_to_list(Next0) when is_function(Next0) ->
+    case Next0() of
+        ok -> [];
+        {K, V, Next1} -> [{K, V} | kv_stream_to_list(Next1)]
+    end.
+
 diff(#{}=A0, #{}=B0) ->
     A = maps:from_list(
           lists:map(fun({version, V}) ->
                             {version, V};
-                       ({K, V}) ->
-                            {K, deserialize_field(K, V)}
+                       ({K, V0}) ->
+                            V =
+                                case {deserialize_field(K, V0), is_raw_field(K)} of
+                                    {V1, true} -> kv_stream_to_list(V1);
+                                    {V1, false} -> V1
+                                end,
+                            {K, V}
                     end, maps:to_list(A0))),
     B = maps:from_list(
           lists:map(fun({version, V}) ->
                             {version, V};
-                       ({K, V}) ->
-                            {K, deserialize_field(K, V)}
+                       ({K, V0}) ->
+                            V =
+                                case {deserialize_field(K, V0), is_raw_field(K)} of
+                                    {V1, true} -> kv_stream_to_list(V1);
+                                    {V1, false} -> V1
+                                end,
+                            {K, V}
                     end, maps:to_list(B0))),
     lists:foldl(
       fun({Field, AI, BI}, Acc) ->
@@ -1474,8 +1435,6 @@ find_pairs_in_file(FD, Pos, MaxPos, Acc) when Pos < MaxPos ->
     {ok, NewPosition} = file:position(FD, {cur, SizV}),
     find_pairs_in_file(FD, NewPosition, MaxPos, [{binary_to_term(Key), {FD, Pos + SizK + 8, SizV}} | Acc]).
 
-
-
 deserialize_pairs(<<Bin/binary>>) ->
     lists:map(
         fun({K0, V}) ->
@@ -1502,11 +1461,12 @@ deserialize_field(hexes, Bin) when is_binary(Bin) ->
     %% We do the deseraialize in a try/catch in case
     %% there are bugs or the structure of hexes changes in the
     %% future.
-    try binary_to_proplist(Bin)
-    catch
-        What:Why ->
-            lager:warning("deserializing hexes from snapshot failed ~p ~p, falling back to binary_to_term", [What, Why]),
-            binary_to_term(Bin)
+    try
+        {ok, Term} = blockchain_term:from_bin(Bin),
+        Term
+    catch What:Why ->
+        lager:warning("deserializing hexes from snapshot failed ~p ~p, falling back to binary_to_term", [What, Why]),
+        binary_to_term(Bin)
     end;
 deserialize_field(K, {FD, Pos, Len}) ->
     case is_raw_field(K) of
@@ -1563,8 +1523,6 @@ mk_file_iterator(FD, Pos, End) when Pos < End ->
             lager:debug("read key of size ~p and value of size ~p", [SizK, SizV]),
             {K, V, mk_file_iterator(FD, Pos + 4 + SizK + 4 + SizV, End)}
     end.
-
-
 
 -spec bin_pairs_from_bin(binary()) -> [{binary(), binary()}].
 bin_pairs_from_bin(<<Bin/binary>>) ->
