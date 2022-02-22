@@ -23,7 +23,7 @@
 
     check_key/2, mark_key/2, unmark_key/2,
 
-    new_context/1, new_direct_context/1, delete_context/1, remove_context/1, reset_context/1, commit_context/1,
+    new_context/1, give_context/2, new_direct_context/1, delete_context/1, remove_context/1, reset_context/1, commit_context/1,
     get_context/1, context_cache/1,
 
     get_block/2, get_raw_block/2, get_block_info/2,
@@ -63,7 +63,7 @@
     %% todo add more here
 
     add_gateway/3, add_gateway/4, add_gateway/6,
-    update_gateway/3,
+    update_gateway/4,
     fixup_neighbors/4,
     add_gateway_location/4,
     add_gateway_gain/4,
@@ -295,10 +295,17 @@ new(Dir, ReadOnly, BlocksDB, BlocksCF, HeightsCF, InfoCF, Options) ->
     L = new(Dir, ReadOnly, Options),
 
     %% allow config-set commit hooks in case we're worried about something being racy
-    Hooks =
-        [#hook{cf = CF, predicate = Predicate, hook_inc_fun = HookIncFun, hook_end_fun = HookEndFun}
-         || {CF, Predicate, HookIncFun, HookEndFun} <- application:get_env(blockchain, commit_hook_callbacks, [])],
-
+    Hooks = lists:foldl(fun(Hook, Acc) ->
+                            case Hook of
+                                {CF, Predicate, HookIncFun, HookEndFun, IncludeHeight} ->
+                                    HookRecord = [#hook{cf = CF, predicate = Predicate, hook_inc_fun = HookIncFun, hook_end_fun = HookEndFun, include_height = IncludeHeight}];
+                                {CF, Predicate, HookIncFun, HookEndFun} ->
+                                    HookRecord = [#hook{cf = CF, predicate = Predicate, hook_inc_fun = HookIncFun, hook_end_fun = HookEndFun}]
+                            end,
+                            lists:append(Acc, HookRecord)
+                        end,
+                        [],
+                        application:get_env(blockchain, commit_hook_callbacks, [])),
     Ledger = maybe_load_aux(L#ledger_v1{
         blocks_db = BlocksDB,
         blocks_cf = BlocksCF,
@@ -460,6 +467,19 @@ new_context(Ledger) ->
     Cache = ets:new(txn_cache, [set, protected, {keypos, 1}]),
     GwCache = ets:new(gw_cache, [set, protected, {keypos, 1}]),
     context_cache(Cache, GwCache, Ledger).
+
+
+give_context(Ledger, Pid) ->
+    case ?MODULE:context_cache(Ledger) of
+        {undefined, undefined} ->
+            ok;
+        {direct, _GwCache} ->
+            ok;
+        {Cache, _GwCache} ->
+            ets:give_away(Cache, Pid, Ledger),
+            ok
+    end.
+
 
 -spec new_direct_context(ledger()) -> ledger().
 new_direct_context(Ledger) ->
@@ -1221,13 +1241,13 @@ load_gateways(Gws, Ledger) ->
     maps:map(
       fun(Address, Gw) ->
               Bin = blockchain_ledger_gateway_v2:serialize(Gw),
-              write_gw_denorm_values(Address, Gw, Ledger),
+              write_gw_denorm_values(Address, new, Gw, Ledger),
               cache_put(Ledger, AGwsCF, Address, Bin)
       end,
       maps:from_list(Gws)),
     ok.
 
-write_gw_denorm_values(Address, Gw, Ledger) ->
+write_gw_denorm_values(Address, new, Gw, Ledger) ->
     GwDenormCF = gw_denorm_cf(Ledger),
     Location = blockchain_ledger_gateway_v2:location(Gw),
     Mode = blockchain_ledger_gateway_v2:mode(Gw),
@@ -1239,7 +1259,40 @@ write_gw_denorm_values(Address, Gw, Ledger) ->
               term_to_binary(LastChallenge)),
     cache_put(Ledger, GwDenormCF, <<Address/binary, "-owner">>, Owner),
     cache_put(Ledger, GwDenormCF, <<Address/binary, "-mode">>, term_to_binary(Mode)),
-    cache_put(Ledger, GwDenormCF, <<Address/binary, "-gain">>, term_to_binary(Gain)).
+    cache_put(Ledger, GwDenormCF, <<Address/binary, "-gain">>, term_to_binary(Gain));
+write_gw_denorm_values(Address, Old, Gw, Ledger) ->
+    GwDenormCF = gw_denorm_cf(Ledger),
+    OldLocation = blockchain_ledger_gateway_v2:location(Old),
+    Location = blockchain_ledger_gateway_v2:location(Gw),
+    OldMode = blockchain_ledger_gateway_v2:mode(Old),
+    Mode = blockchain_ledger_gateway_v2:mode(Gw),
+    OldGain = blockchain_ledger_gateway_v2:gain(Old),
+    Gain = blockchain_ledger_gateway_v2:gain(Gw),
+    OldLastChallenge = blockchain_ledger_gateway_v2:last_poc_challenge(Old),
+    LastChallenge = blockchain_ledger_gateway_v2:last_poc_challenge(Gw),
+    OldOwner = blockchain_ledger_gateway_v2:owner_address(Old),
+    Owner = blockchain_ledger_gateway_v2:owner_address(Gw),
+    case Location == OldLocation of
+        true -> ok;
+        _ -> cache_put(Ledger, GwDenormCF, <<Address/binary, "-loc">>, term_to_binary(Location))
+    end,
+    case LastChallenge == OldLastChallenge of
+        true -> ok;
+        _ -> cache_put(Ledger, GwDenormCF, <<Address/binary, "-last-challenge">>,
+                       term_to_binary(LastChallenge))
+    end,
+    case Owner == OldOwner of
+        true -> ok;
+        _ -> cache_put(Ledger, GwDenormCF, <<Address/binary, "-owner">>, Owner)
+    end,
+    case Mode == OldMode of
+        true -> ok;
+        _ -> cache_put(Ledger, GwDenormCF, <<Address/binary, "-mode">>, term_to_binary(Mode))
+    end,
+    case Gain == OldGain of
+        true -> ok;
+            _ -> cache_put(Ledger, GwDenormCF, <<Address/binary, "-gain">>, term_to_binary(Gain))
+    end.
 
 -spec entries(ledger()) -> entries().
 entries(Ledger) ->
@@ -1502,7 +1555,7 @@ add_gateway(OwnerAddr, GatewayAddress, Mode, Ledger) ->
             {error, gateway_already_active};
         _ ->
             Gateway = blockchain_ledger_gateway_v2:new(OwnerAddr, undefined, Mode),
-            update_gateway(Gateway, GatewayAddress, Ledger)
+            update_gateway(new, Gateway, GatewayAddress, Ledger)
     end.
 
 %% NOTE: This should only be allowed when adding a gateway which was
@@ -1549,7 +1602,7 @@ add_gateway(OwnerAddr,
                         NewGw1
                 end,
 
-            update_gateway(NewGw, GatewayAddress, Ledger)
+            update_gateway(new, NewGw, GatewayAddress, Ledger)
     end.
 
 fixup_neighbors(Addr, Gateways, Neighbors, Ledger) ->
@@ -1577,14 +1630,15 @@ fixup_neighbors(Addr, Gateways, Neighbors, Ledger) ->
                           blockchain_ledger_gateway_v2:add_neighbor(Addr, G)
                   end, Add),
     maps:map(fun(A, G) ->
-                     update_gateway(G, A, Ledger)
+                     update_gateway(new, G, A, Ledger)
              end, maps:merge(R1, A1)),
     ok.
 
--spec update_gateway(Gw :: blockchain_ledger_gateway_v2:gateway(),
+-spec update_gateway(Old :: blockchain_ledger_gateway_v2:gateway() | new,
+                     Gw :: blockchain_ledger_gateway_v2:gateway(),
                      GwAddr :: libp2p_crypto:pubkey_bin(),
                      Ledger :: ledger()) -> ok | {error, _}.
-update_gateway(Gw0, GwAddr, Ledger) ->
+update_gateway(Old, Gw0, GwAddr, Ledger) ->
     %% we have to do this each time to make sure that we have ledger convergence for snapshots, but
     %% it feels relatively cheap in comparison to continuing to update scores.
     Gw =
@@ -1599,7 +1653,7 @@ update_gateway(Gw0, GwAddr, Ledger) ->
     Bin = blockchain_ledger_gateway_v2:serialize(Gw),
     AGwsCF = active_gateways_cf(Ledger),
     cache_put(Ledger, AGwsCF, GwAddr, Bin),
-    write_gw_denorm_values(GwAddr, Gw, Ledger).
+    write_gw_denorm_values(GwAddr, Old, Gw, Ledger).
 
 -spec add_gateway_location(libp2p_crypto:pubkey_bin(), non_neg_integer(), non_neg_integer(), ledger()) -> ok | {error, no_active_gateway}.
 add_gateway_location(GatewayAddress, Location, Nonce, Ledger) ->
@@ -1614,7 +1668,7 @@ add_gateway_location(GatewayAddress, Location, Nonce, Ledger) ->
             Gw3 = Gw2, %blockchain_ledger_gateway_v2:last_location_nonce(Nonce, Gw2),
             Gw4 = blockchain_ledger_gateway_v2:set_alpha_beta_delta(1.0, 1.0, Height, Gw3),
             NewGw = blockchain_ledger_gateway_v2:clear_witnesses(Gw4),
-            update_gateway(NewGw, GatewayAddress, Ledger)
+            update_gateway(Gw, NewGw, GatewayAddress, Ledger)
     end.
 
 -spec add_gateway_gain(libp2p_crypto:pubkey_bin(), integer(), non_neg_integer(), ledger()) -> ok | {error, no_active_gateway}.
@@ -1625,7 +1679,7 @@ add_gateway_gain(GatewayAddress, Gain, Nonce, Ledger) ->
         {ok, Gw} ->
             Gw1 = blockchain_ledger_gateway_v2:gain(Gain, Gw),
             Gw2 = blockchain_ledger_gateway_v2:nonce(Nonce, Gw1),
-            update_gateway(Gw2, GatewayAddress, Ledger)
+            update_gateway(Gw, Gw2, GatewayAddress, Ledger)
     end.
 
 -spec add_gateway_elevation(libp2p_crypto:pubkey_bin(), integer(), non_neg_integer(), ledger()) -> ok | {error, no_active_gateway}.
@@ -1636,7 +1690,7 @@ add_gateway_elevation(GatewayAddress, Elevation, Nonce, Ledger) ->
         {ok, Gw} ->
             Gw1 = blockchain_ledger_gateway_v2:elevation(Elevation, Gw),
             Gw2 = blockchain_ledger_gateway_v2:nonce(Nonce, Gw1),
-            update_gateway(Gw2, GatewayAddress, Ledger)
+            update_gateway(Gw, Gw2, GatewayAddress, Ledger)
     end.
 
 cg_versions(Ledger) ->
@@ -1760,7 +1814,7 @@ update_gateway_score(GatewayAddress, {Alpha, Beta}, Ledger) ->
             NewGw = blockchain_ledger_gateway_v2:set_alpha_beta_delta(blockchain_utils:normalize_float(Alpha0 + Alpha),
                                                                       blockchain_utils:normalize_float(Beta0 + Beta),
                                                                       Height, Gw),
-            update_gateway(NewGw, GatewayAddress, Ledger)
+            update_gateway(Gw, NewGw, GatewayAddress, Ledger)
     end.
 
 -spec gateway_score(GatewayAddress :: libp2p_crypto:pubkey_bin(), Ledger :: ledger()) -> {ok, float()} | {error, any()}.
@@ -1785,7 +1839,7 @@ update_gateway_oui(Gateway, OUI, Nonce, Ledger) ->
         {ok, Gw} ->
             NewGw0 = blockchain_ledger_gateway_v2:oui(OUI, Gw),
             NewGw = blockchain_ledger_gateway_v2:nonce(Nonce, NewGw0),
-            update_gateway(NewGw, Gateway, Ledger)
+            update_gateway(Gw, NewGw, Gateway, Ledger)
     end.
 
 -spec insert_witnesses(PubkeyBin :: libp2p_crypto:pubkey_bin(),
@@ -1861,7 +1915,7 @@ remove_gateway_witness(GatewayPubkeyBin, Ledger) ->
             Error;
         {ok, GW0} ->
             GW1 = blockchain_ledger_gateway_v2:clear_witnesses(GW0),
-            ?MODULE:update_gateway(GW1, GatewayPubkeyBin, Ledger)
+            ?MODULE:update_gateway(GW0, GW1, GatewayPubkeyBin, Ledger)
     end.
 
 -spec refresh_gateway_witnesses(blockchain_block:hash(), ledger()) -> ok | {error, any()}.
@@ -1961,7 +2015,7 @@ request_poc_(OnionKeyHash, SecretHash, Challenger, BlockHash, Ledger, Gw0, Versi
     Gw1 = blockchain_ledger_gateway_v2:last_poc_challenge(Height+1, Gw0),
     Gw2 = blockchain_ledger_gateway_v2:last_poc_onion_key_hash(OnionKeyHash, Gw1),
     Gw3 = blockchain_ledger_gateway_v2:version(Version, Gw2),
-    ok = update_gateway(Gw3, Challenger, Ledger),
+    ok = update_gateway(Gw0, Gw3, Challenger, Ledger),
 
     PoCsCF = pocs_cf(Ledger),
     PoC = blockchain_ledger_poc_v2:new(SecretHash, OnionKeyHash, Challenger, BlockHash),
@@ -4242,7 +4296,7 @@ bootstrap_gw_denorm(Ledger) ->
       AGwsCF,
       fun({GwAddr, Binary}, _) ->
               Gw = blockchain_ledger_gateway_v2:deserialize(Binary),
-              write_gw_denorm_values(GwAddr, Gw, Ledger)
+              write_gw_denorm_values(GwAddr, new, Gw, Ledger)
       end,
       ignore).
 
@@ -4474,7 +4528,8 @@ batch_from_cache(ETS, #ledger_v1{commit_hooks = Hooks, mode = Mode} = Ledger) ->
                           {B, Changes1}
                   end, {Batch, []}, ETS),
     %% we don't actually want to invoke this here, but passing back the arguments is kind of clunky
-    {fun() -> invoke_commit_hooks(FilteredChanges, Filters) end, Batch}.
+    {ok, Height} = current_height(Ledger),
+    {fun() -> invoke_commit_hooks(FilteredChanges, Filters, Height) end, Batch}.
 
 apply_filters(CF, Filters, Key, Value) ->
     %% pre-tested for existence
@@ -4489,10 +4544,10 @@ apply_filters(CF, Filters, Key, Value) ->
             lists:any(fun(P) -> P(Key, Value) end, Preds)
     end.
 
-invoke_commit_hooks([] = _Changes, _Filters) ->
+invoke_commit_hooks([] = _Changes, _Filters, _Height) ->
     %% if no changes then do nothing
     ok;
-invoke_commit_hooks(Changes, Filters) ->
+invoke_commit_hooks(Changes, Filters, Height) ->
     %% best effort async delivery
     FiltersMap = maps:fold(fun(CF, HookList, Acc) ->
                                    #hook{cf = CFAtom} = hd(HookList),
@@ -4522,14 +4577,24 @@ invoke_commit_hooks(Changes, Filters) ->
                                 noop;
                             HookChanges ->
                                 lists:foreach(
-                                  fun(#hook{hook_inc_fun = HookFun, predicate = undefined}) ->
-                                          HookFun(HookChanges);
-                                     (#hook{hook_inc_fun = HookFun, predicate = Pred}) ->
+                                  fun(#hook{hook_inc_fun = HookFun, predicate = undefined, include_height = IncludeHeight}) ->
+                                          case IncludeHeight of
+                                              true ->
+                                                HookFun(HookChanges, Height);
+                                              _ ->
+                                                HookFun(HookChanges)
+                                          end;
+                                     (#hook{hook_inc_fun = HookFun, predicate = Pred, include_height = IncludeHeight}) ->
                                           FilteredHookChanges =
                                               lists:filter(fun({_, _, K, V}) ->
                                                                    Pred(K, V)
                                                            end, HookChanges),
-                                          HookFun(FilteredHookChanges)
+                                          case IncludeHeight of
+                                              true ->
+                                                HookFun(FilteredHookChanges, Height);
+                                              _ ->
+                                                HookFun(FilteredHookChanges)
+                                          end
                                   end, HookList)
                         end
                 end,
@@ -4549,9 +4614,15 @@ invoke_commit_hooks(Changes, Filters) ->
                                 %% iterate over the changes for this group and collect the keys which have been modified
                                 CFChangedKeys = [{Action, Key} || {_CF, Action, Key, _Value} <- CFChanges],
                                 lists:foreach(
-                                  fun(#hook{hook_end_fun = HookFun}) ->
+                                  fun(#hook{hook_end_fun = HookFun, include_height = IncludeHeight}) ->
                                           %% call the end fun, pass it the updated CF and the list of modified keys
-                                          HookFun(CFAtom, CFChangedKeys)
+                                          case IncludeHeight of
+                                              true ->
+                                                %% include the ledger commit height if requested
+                                                HookFun(CFAtom, CFChangedKeys, Height);
+                                              _ ->
+                                                HookFun(CFAtom, CFChangedKeys)
+                                          end
                                   end, HookList)
                         end
                 end,
@@ -5627,15 +5698,23 @@ commit_hooks_test() ->
     Me = self(),
     %% check that config-set hooks work
     %% {CF, Predicate, HookIncFun, HookEndFun} <- application:get_env(blockchain, commit_hook_callbacks, [])],
+    %% {CF, Predicate, HookIncFun, HookEndFun, IncludeHeight} <- application:get_env(blockchain, commit_hook_callbacks, [])],
     application:set_env(blockchain, commit_hook_callbacks,
                         [{active_gateways,
                             undefined,
                             fun(Changes) -> Me ! {hook1, Changes} end,
-                            fun(_CF, ChangedKeys) -> Me ! {hook1, changes_complete, ChangedKeys} end
+                            fun(_CF, ChangedKeys) -> Me ! {hook1, changes_complete, ChangedKeys} end                            
+                        },
+                        {active_gateways,
+                            undefined,
+                            fun(Changes, Height) -> Me ! {hook2, Changes, Height} end,
+                            fun(_CF, ChangedKeys, Height) -> Me ! {hook2, changes_complete, ChangedKeys, Height} end,
+                            true                            
                         }]),
 
     Ledger = new(BaseDir),
     Ledger1 = new_context(Ledger),
+    {ok, Ledger1Height} = current_height(Ledger1),
     ok = add_gateway(<<"owner_address 1">>, <<"gw_address">>, Ledger1),
     ok = commit_context(Ledger1),
 
@@ -5651,10 +5730,26 @@ commit_hooks_test() ->
             error(config_set_timeout)
     end,
 
+    receive
+        {hook2, _, ReceivedHeight1} -> 
+            ?assertMatch(Ledger1Height,
+                         ReceivedHeight1)
+    after 200 ->
+            error(hook2_timeout)
+    end,
+
+    receive
+        {hook2, changes_complete, _, ReceivedHeight2} ->
+            ?assertMatch(Ledger1Height,
+                         ReceivedHeight2)
+    after 200 ->
+            error(config_set_timeout)
+    end,
+
     %% check that multiple hooks fire
     {_Ref, Ledger2} = add_commit_hook(entries,
-                                        fun(Changes) -> Me ! {hook2, Changes} end,
-                                        fun(_CF, ChangedKeys) -> Me ! {hook2, changes_complete, ChangedKeys} end,
+                                        fun(Changes) -> Me ! {hook3, Changes} end,
+                                        fun(_CF, ChangedKeys) -> Me ! {hook3, changes_complete, ChangedKeys} end,
                                         fun(K, _) -> K == <<"my_address">> end, Ledger1),
     Ledger3 = new_context(Ledger2),
     ok = add_gateway(<<"owner_address 2">>, <<"gw_address 2">>, Ledger3),
@@ -5678,17 +5773,17 @@ commit_hooks_test() ->
 
     %% confirm we get expected msgs from the 2nd hook
     receive
-        {hook2, Changes} ->
+        {hook3, Changes} ->
             ?assertMatch([{_, put, <<"my_address">>, _}],
                          Changes)
     after 200 ->
-            error(hook2_timeout)
+            error(hook3_timeout)
     end,
 
     receive
-        {hook2, changes_complete, _ReceivedChangedKeys3} -> ok
+        {hook3, changes_complete, _ReceivedChangedKeys3} -> ok
     after 200 ->
-            error(hook2_timeout)
+            error(hook3_timeout)
     end,
 
 

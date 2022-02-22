@@ -380,10 +380,18 @@ serialize_v6(#{version := v6}=Snapshot0, BlocksOrNoBlocks) ->
             noblocks ->
                 EmptyListBin
         end,
+    Infos =
+        case BlocksOrNoBlocks of
+            blocks ->
+                maps:get(infos, Snapshot0, EmptyListBin);
+            noblocks ->
+                EmptyListBin
+        end,
 
     Snapshot1 = maps:put(blocks, Blocks, Snapshot0),
+    Snapshot2 = maps:put(infos, Infos, Snapshot1),
 
-    Pairs = lists:keysort(1, maps:to_list(Snapshot1)),
+    Pairs = lists:keysort(1, maps:to_list(Snapshot2)),
     frame(6, serialize_pairs(Pairs)).
 
 -spec serialize_v5(snapshot_v5(), noblocks) -> binary().
@@ -674,8 +682,6 @@ load_blocks(Ledger0, Chain, Snapshot) ->
                 stream_from_list([])
         end,
 
-    true = erlang:is_function(BlockStream),
-
     print_memory(),
     {ok, Curr2} = blockchain_ledger_v1:current_height(Ledger0),
 
@@ -688,12 +694,7 @@ load_blocks(Ledger0, Chain, Snapshot) ->
                     {ok, <<B0/binary>>} -> B0;
                     <<B0/binary>> -> B0
                 end,
-              Block =
-              case Block0 of
-                  B when is_binary(B) ->
-                      blockchain_block:deserialize(B);
-                  B -> B
-              end,
+            Block = blockchain_block:deserialize(Block0),
 
               Ht = blockchain_block:height(Block),
               %% since hash and block are written at the same time, just getting the
@@ -732,6 +733,7 @@ load_blocks(Ledger0, Chain, Snapshot) ->
       end,
       BlockStream).
 
+-spec stream_iter(fun((A) -> ok), blockchain_term:stream(A)) -> ok.
 stream_iter(F, S0) ->
     case S0() of
         none ->
@@ -741,6 +743,7 @@ stream_iter(F, S0) ->
             stream_iter(F, S1)
     end.
 
+-spec stream_from_list([A]) -> blockchain_term:stream(A).
 stream_from_list([]) ->
     fun () -> none end;
 stream_from_list([X | Xs]) ->
@@ -762,7 +765,7 @@ get_infos(Chain) ->
      || N <- lists:seq(max(?min_height, LoadInfoStart), Height)].
 
 -spec get_blocks(blockchain:blockchain()) ->
-    [binary()].
+    {ok, [binary()]} | {error, encountered_a_rescue_block}.
 get_blocks(Chain) ->
     Ledger = blockchain:ledger(Chain),
     {ok, Height} = blockchain_ledger_v1:current_height(Ledger),
@@ -789,11 +792,23 @@ get_blocks(Chain) ->
     %% whichever is lower.
     LoadBlockStart = min(DHeight, ElectionHeight - GraceBlocks),
 
-    [begin
-         {ok, B} = blockchain:get_raw_block(N, Chain),
-         B
-     end
-     || N <- lists:seq(max(?min_height, LoadBlockStart), Height)].
+    BlockHeightRange = lists:seq(max(?min_height, LoadBlockStart), Height),
+    Error = encountered_a_rescue_block,
+    try
+        FetchBlockAtHeight =
+            fun (H) ->
+                {ok, <<BlockRaw/binary>>} = blockchain:get_raw_block(H, Chain),
+                Block = blockchain_block:deserialize(BlockRaw),
+                case blockchain_block:is_rescue_block(Block) of
+                    true -> throw(Error);
+                    false -> BlockRaw
+                end
+            end,
+        Blocks = lists:map(FetchBlockAtHeight, BlockHeightRange),
+        {ok, Blocks}
+    catch throw:Error ->
+        {error, Error}
+    end.
 
 is_v6(#{version := v6}) -> true;
 is_v6(_) -> false.
@@ -820,10 +835,14 @@ hash(Snap) ->
         v6 ->
             %% attempt to incrementally hash the snapshot without building up a big binary
             Ctx0 = crypto:hash_init(sha256),
-            Size = snapshot_size(Snap#{blocks => <<>>}),
+            Size = snapshot_size(Snap#{blocks => <<>>, infos => <<>>}),
             Ctx1 = crypto:hash_update(Ctx0, <<6, Size:32/integer-unsigned-little>>),
             FinalCtx = lists:foldl(fun({blocks, _}, Acc) ->
                               Key = term_to_binary(blocks),
+                              KeyLen = byte_size(Key),
+                              crypto:hash_update(Acc, <<KeyLen:32/integer-unsigned-little, Key/binary, 0:32/integer-unsigned-little>>);
+                          ({infos, _}, Acc) ->
+                              Key = term_to_binary(infos),
                               KeyLen = byte_size(Key),
                               crypto:hash_update(Acc, <<KeyLen:32/integer-unsigned-little, Key/binary, 0:32/integer-unsigned-little>>);
                           ({version, Version}, Acc) ->
@@ -847,7 +866,7 @@ hash(Snap) ->
                               hash_bytes(TmpCtx, FD, Len)
                       end, Ctx1, lists:keysort(1, maps:to_list(Snap))),
             crypto:hash_final(FinalCtx);
-        _ -> 
+        _ ->
             crypto:hash(sha256, serialize(Snap, noblocks))
     end.
 
